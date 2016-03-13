@@ -13,6 +13,11 @@
 const int CEPIN = 8;
 const int CSPIN = 9;
 
+//MISO PIN gives status Pg 49, Section 8.3.2 nRF24L01+ datasheet
+const int MISOPIN = 11; // green on Rajat's board
+
+// MOSI PIN needs to get the command to read MOSI and status
+const int MOSIPIN = 10; // yellow on Rajat's board
 // CSNPIN is the SPI CS
 // RED on Rajat's Board
 const int CSNPIN = 10;
@@ -165,6 +170,15 @@ const int NRF_RX_ADDR_P0 = 0x0A;
 const int ADDRESS_BUFFER_SIZE = 5;
 
 //-------------------------------------
+uint8_t status_rd() {
+  uint8_t readstatus;
+  readstatus = nrf_read(0x07); //STATUS register also simultaenously to MISO
+  return readstatus;
+}
+
+//-------------------------------------
+// Read the value at register address
+//-------------------------------------
 int nrf_read(int address) {
   int cmd;
 
@@ -181,7 +195,6 @@ int nrf_read(int address) {
   return(val);
   
 }
-
 //-------------------------------------
 
 
@@ -239,7 +252,8 @@ void nrf_multi_write(int address, int size, unsigned char *buffer) {
 }
 //-------------------------------------
 
-
+//-------------------------------------
+// SPI Write value to register at address
 //-------------------------------------
 void nrf_write(int address, int val) {
 
@@ -258,10 +272,18 @@ void nrf_write(int address, int val) {
 }
 //-------------------------------------
 
+//-------------------------------------
+set RF Channel to channel n
+//-------------------------------------
+void setRFChannel(uint8_t n) {
+  nrf_write(0x05,n);
+  return;
+}
+//-------------------------------------
+
 
 //-------------------------------------
 int test_read(void) {
-
   return(nrf_read(0x0C));
 }
 //-------------------------------------
@@ -269,7 +291,6 @@ int test_read(void) {
 
 //-------------------------------------
 void test_write(void) {
-
   nrf_write(0x0C, 0x09);
 }
 //-------------------------------------
@@ -309,7 +330,6 @@ void configure_phy(unsigned short config, unsigned short rf_setup, unsigned shor
 
 void enter_promiscuous_mode()
 {
-  digitalWrite(CEPIN, LOW);
   nrf_write(EN_RXADDR, ENRX_P0);
   
 }
@@ -332,7 +352,9 @@ void setup() {
   pinMode(CEPIN, OUTPUT);
   pinMode(CSPIN, OUTPUT);
   pinMode(CSNPIN, OUTPUT);
-
+  pinMode(MISOPIN, INPUT);
+  pinMode(MOSIPIN, OUTPUT);
+  
   for (int i = 0; i < 5; i++) {
     digitalWrite(DEBUG_LED, HIGH);
     delay(500);
@@ -382,7 +404,7 @@ void setup() {
   }
   
   
-  //while (1) ;
+  while (1) ;
 }
 //-------------------------------------
 
