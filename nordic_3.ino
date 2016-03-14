@@ -25,6 +25,7 @@ const int CSNPIN = 10;
 const int DEBUG_LED = 13;
 //---------------------------------------------
 
+uint8_t channel = 1; 
 //---------------------------------------------
 //    Radio SPI registers and constants 
 //---------------------------------------------
@@ -273,7 +274,7 @@ void nrf_write(int address, int val) {
 //-------------------------------------
 
 //-------------------------------------
-set RF Channel to channel n
+//set RF Channel to channel n
 //-------------------------------------
 void setRFChannel(uint8_t n) {
   nrf_write(0x05,n);
@@ -300,7 +301,7 @@ unsigned short* convert_uint8_array_to_lsb_first(unsigned short* val, unsigned s
   unsigned short lsbval[length]; 
   return val;
 }
-void configure_address(unsigned short* address, unsigned short length)
+void configure_address(uint8_t* address, unsigned short length)
 {
   nrf_write(EN_RXADDR, ENRX_P0);
   nrf_write(SETUP_AW, length - 2);
@@ -328,11 +329,6 @@ void configure_phy(unsigned short config, unsigned short rf_setup, unsigned shor
   nrf_write(RX_PW_P0, rx_pw);
 }
 
-void enter_promiscuous_mode()
-{
-  nrf_write(EN_RXADDR, ENRX_P0);
-  
-}
 
 //-------------------------------------
 void setup() {
@@ -368,7 +364,7 @@ void setup() {
   test_write();
 
   val = test_read();
-  Serial.print("Val from read (after write is : "); Serial.println(val);
+  Serial.print("Val from read (after write) is : "); Serial.println(val);
 
 
   Serial.println("Setting the RX Address Width 0x00 => (AW <- 2)");
@@ -404,14 +400,76 @@ void setup() {
   }
   
   
-  while (1) ;
+  //while (1) ;
 }
 //-------------------------------------
 
+void flush_rx() {
+  digitalWrite(CSNPIN, LOW) ;
+  SPI.transfer(FLUSH_RX);
+  digitalWrite(CSNPIN, HIGH); 
+}
 
+void flush_tx() {
+  digitalWrite(CSNPIN, LOW) ;
+  SPI.transfer(FLUSH_TX);
+  digitalWrite(CSNPIN, HIGH); 
+}
+
+void hexdump(uint8_t* arr, uint8_t len) {
+  for (int i = 0; i < len; i++) {
+    Serial.print("0x");
+    Serial.print(arr[i], HEX);
+    Serial.print(" ");
+  }
+  Serial.println("");
+}
 //-------------------------------------
 void loop() {
-  
+   uint8_t promiscuous_address[2] = { 0xAA, 0x00 };
+   unsigned long timeout = 100;
+   channel = 1; 
+   int readval ;
+   uint8_t packet[33];
+   uint8_t tryno = 0;
+   
+   while (channel < 85) 
+   {
+      unsigned long starttime = millis();
+      nrf_write(0x07,0x78); //reset status register
+      nrf_write(CONFIG, 0x73); //disable crc, power up,  mask interrups
+      configure_address(promiscuous_address, 2);
+      configure_mac(0,0, ENAA_NONE);
+      configure_phy (PRIM_RX | PWR_UP, RATE_2M, 32);
+      Serial.print("Tuning to channel: "); Serial.println(channel);
+      nrf_write(RF_CH,channel++); //  Set the frequency to channel
+      /*nrf_write(SETUP_AW, 0x00); 
+      nrf_write(FEATURE, 0); // Disable dyn payload length,
+      nrf_write(DYNPD, 0); // Disable dynamic payload
+      nrf_write(EN_AA, 0); // Disable auto acknowledgement
+      */
+      while (millis() - starttime < timeout) 
+      {
+        readval = nrf_read(R_RX_PL_WID); 
+        if (readval <= 32) {
+          Serial.print("== ");Serial.println(readval);
+          nrf_multi_read(R_RX_PAYLOAD, readval, packet);
+          packet[readval] = 0x00;
+          flush_rx();
+          nrf_write(0x07,0x78); //reset status register
+          if (readval > 0)
+          {  
+            Serial.print("Packet obtained of size :"); 
+            Serial.println(readval); 
+            hexdump(packet,readval); 
+            starttime = millis();  // reset the timeout counter if packet received
+          }
+        }
+      }
+      //delay(200); //ms
+   }
+   channel = 1; 
+    
 }
 //-------------------------------------
 
