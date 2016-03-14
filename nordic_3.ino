@@ -334,7 +334,7 @@ void configure_phy(unsigned short config, unsigned short rf_setup, unsigned shor
 void setup() {
   int val;
   int i;
-  unsigned char address_buffer[ADDRESS_BUFFER_SIZE];
+  unsigned char address_buffer[ADDRESS_BUFFER_SIZE] = { 0x01, 0x02, 0x03, 0x04 };
 
   delay(200);
   
@@ -348,8 +348,8 @@ void setup() {
   pinMode(CEPIN, OUTPUT);
   pinMode(CSPIN, OUTPUT);
   pinMode(CSNPIN, OUTPUT);
-  pinMode(MISOPIN, INPUT);
-  pinMode(MOSIPIN, OUTPUT);
+  //pinMode(MISOPIN, INPUT);
+  //pinMode(MOSIPIN, OUTPUT);
   
   for (int i = 0; i < 5; i++) {
     digitalWrite(DEBUG_LED, HIGH);
@@ -399,7 +399,7 @@ void setup() {
     Serial.println(address_buffer[i], HEX);
   }
   
-  
+  delay(2000);
   //while (1) ;
 }
 //-------------------------------------
@@ -426,7 +426,7 @@ void hexdump(uint8_t* arr, uint8_t len) {
 }
 //-------------------------------------
 void loop() {
-   uint8_t promiscuous_address[2] = { 0xAA, 0x00 };
+   uint8_t promiscuous_address[2] = { 0x55, 0x00 };
    unsigned long timeout = 100;
    channel = 1; 
    int readval ;
@@ -452,7 +452,13 @@ void loop() {
       {
         readval = nrf_read(R_RX_PL_WID); 
         if (readval <= 32) {
-          Serial.print("== ");Serial.println(readval);
+          tryno = status_rd();
+          Serial.print("== ");
+          Serial.print(channel); 
+          Serial.print(" "); 
+          Serial.print(readval); 
+          Serial.print(" Status: "); 
+          Serial.print(tryno);
           nrf_multi_read(R_RX_PAYLOAD, readval, packet);
           packet[readval] = 0x00;
           flush_rx();
@@ -460,9 +466,10 @@ void loop() {
           if (readval > 0)
           {  
             Serial.print("Packet obtained of size :"); 
-            Serial.println(readval); 
+            Serial.print(readval); 
+            Serial.print(" ");
             hexdump(packet,readval); 
-            starttime = millis();  // reset the timeout counter if packet received
+            //starttime = millis();  // reset the timeout counter if packet received
           }
         }
       }
