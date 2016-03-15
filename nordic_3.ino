@@ -494,13 +494,14 @@ void process_packet_data(uint8_t* payload)
 
     // Read the payload length
     int payload_length = payload[5] >> 2;
-    Serial.print("Payload appears to be : ");Serial.print(payload_length); Serial.println(" bytes");
+    
     uint16_t crc_given, crc;
     // Check for a valid payload length, which is less than the usual 32 bytes 
     // because we need to account for the packet header, CRC, and part or all 
     // of the address bytes. 
     if(payload_length <= 26)
     {
+      Serial.print("Payload appears to be : ");Serial.print(payload_length); Serial.println(" bytes");
       // Read the given CRC
       crc_given = (payload[6 + payload_length] << 9) | ((payload[7 + payload_length]) << 1);
       crc_given = (crc_given << 8) | (crc_given >> 8);
@@ -531,16 +532,19 @@ void loop() {
    int readval ;
    uint8_t packet[37];
    uint8_t tryno = 0;
+   uint8_t addr[5]  = { 0xff } ; 
+   uint8_t fifostatus ; 
+   uint16_t packetscaptured = 0 ;
    
    while (channel < 85) 
    {
       unsigned long starttime = millis();
-      nrf_write(0x07,0x78); //reset status register
+      nrf_write(STATUS,0x70); //reset status register
       nrf_write(CONFIG, 0x73); //disable crc, power up,  mask interrups
       configure_address(promiscuous_address, 2);
       configure_mac(0,0, ENAA_NONE);
-    
-    // Set for transmission
+      
+    // Set for transmissi on
     //  Please note the CE PIN must be driven high.
       configure_phy (PRIM_RX | PWR_UP, RATE_2M, 32);
       delay(2);
@@ -554,22 +558,35 @@ void loop() {
       nrf_write(DYNPD, 0); // Disable dynamic payload
       nrf_write(EN_AA, 0); // Disable auto acknowledgement
       */
+      packetscaptured = 0;
       while (millis() - starttime < timeout) 
       {
         readval = r_rx_pld_wid(); 
-        if (readval <= 32 && readval > 0) {
+        if (readval <= 32 && readval > 0) 
+        {
+          
           tryno = status_rd();
           r_rx_payload(packet,readval);
-          if (tryno == 0) {
+          nrf_multi_read(RX_ADDR_P0, 5, addr);
+          nrf_write(STATUS, 0x40); //reset status
+          fifostatus = nrf_read(FIFO_STATUS); // Expect the RX_EMPTY flag set
+          if (tryno == 0x40) 
+          {
+            packetscaptured++;
             Serial.print("== ");
             Serial.print(channel); 
             Serial.print(" "); 
             Serial.print(readval); 
             Serial.print("  Status reg: "); 
-            Serial.println(tryno, HEX);
-            //packet[readval] = 0x00;
-            //flush_rx();
-            nrf_write(0x07,0x78); //reset status register
+            Serial.print(tryno, HEX);
+            Serial.print(" Address : ");
+            for (int i=0; i < 5; i++) 
+            {
+               Serial.print(addr[i], HEX); Serial.print(" ");
+            } 
+            Serial.print(" FIFO_STATUS : ");
+            Serial.print(fifostatus,HEX);
+            Serial.println("");
             if (readval > 0)
             {  
               Serial.print("Packet obtained of size :"); 
@@ -580,10 +597,16 @@ void loop() {
               starttime = millis();  // reset the timeout counter if packet received
             }
           }
+          else 
+            if (tryno == 0x00) {
+              flush_rx();
+            }
         }
-       nrf_write(0x07,0x78); //clear status reg 
+       nrf_write(STATUS,0x40); //clear status reg 
       }
-      channel++; 
+      Serial.print(" Packets captured at Channel "); Serial.print(channel); Serial.print(" : "); Serial.println(packetscaptured); 
+      channel++;
+      packetscaptured = 0 ; 
       //delay(200); //ms
    }
    //channel = 1; 
