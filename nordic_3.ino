@@ -10,8 +10,9 @@
 
 //---------------------------------------------
 // Hardware configuration
-const int CEPIN = 8;
-const int CSPIN = 9;
+// CEPIN is the read enable pin - see p22, section 6.1.4
+const int CEPIN = 9;
+// const int CSPIN = 9;
 
 //MISO PIN gives status Pg 49, Section 8.3.2 nRF24L01+ datasheet
 const int MISOPIN = 11; // green on Rajat's board
@@ -272,6 +273,22 @@ void nrf_write(int address, int val) {
 
 }
 //-------------------------------------
+// R_RX_PL_WID Command
+//-------------------------------------
+uint8_t r_rx_pld_wid() {
+  uint8_t rxpayloadwidth;
+  uint8_t cmd = 0x60;
+  uint8_t junk = 0x00; 
+  
+  digitalWrite(CSNPIN, LOW);
+  SPI.transfer(cmd);
+  rxpayloadwidth = SPI.transfer(junk);
+  digitalWrite(CSNPIN, HIGH);
+
+  return rxpayloadwidth;
+}
+//-------------------------------------
+
 
 //-------------------------------------
 //set RF Channel to channel n
@@ -346,7 +363,7 @@ void setup() {
 
   // initalize the  data ready and chip select pins:
   pinMode(CEPIN, OUTPUT);
-  pinMode(CSPIN, OUTPUT);
+  //pinMode(CSPIN, OUTPUT);
   pinMode(CSNPIN, OUTPUT);
   //pinMode(MISOPIN, INPUT);
   //pinMode(MOSIPIN, OUTPUT);
@@ -398,25 +415,48 @@ void setup() {
   for (i = 0; i < ADDRESS_BUFFER_SIZE; i++) {
     Serial.println(address_buffer[i], HEX);
   }
+
+
+  nrf_write(CONFIG,0x00); //stop nRF24L01+ 
+  nrf_write(EN_AA, 0x00); //disable shockburst
+  nrf_write(EN_RXADDR, 0x01); //enable data pipe 0
+  nrf_write(DYNPD, 0x00); 
+  nrf_write(FEATURE, 0x00); 
+  nrf_write(SETUP_AW,AW_2); 
+  nrf_write(CONFIG, 0x73); 
   
   delay(2000);
   //while (1) ;
 }
 //-------------------------------------
 
+
+void r_rx_payload(uint8_t* data, uint8_t numbytes) {
+  uint8_t junk = 0x00;
+  
+  digitalWrite(CSNPIN, LOW);
+  SPI.transfer(R_RX_PAYLOAD);
+  for (int i=0; i < numbytes; i++) {
+    data[numbytes-1 -i] = SPI.transfer(junk);
+  }
+  digitalWrite(CSNPIN, HIGH);
+  return ;  
+}
 void flush_rx() {
   digitalWrite(CSNPIN, LOW) ;
   SPI.transfer(FLUSH_RX);
   digitalWrite(CSNPIN, HIGH); 
 }
 
-void flush_tx() {
+void flush_tx() 
+{
   digitalWrite(CSNPIN, LOW) ;
   SPI.transfer(FLUSH_TX);
   digitalWrite(CSNPIN, HIGH); 
 }
 
-void hexdump(uint8_t* arr, uint8_t len) {
+void hexdump(uint8_t* arr, uint8_t len) 
+{
   for (int i = 0; i < len; i++) {
     Serial.print("0x");
     Serial.print(arr[i], HEX);
@@ -424,13 +464,72 @@ void hexdump(uint8_t* arr, uint8_t len) {
   }
   Serial.println("");
 }
+
+
+// Update a CRC16-CCITT with 1-8 bits from a given byte
+uint16_t crc_update(uint16_t crc, uint8_t byte, uint8_t bits)
+{
+  crc = crc ^ (byte << 8);
+  while(bits--)
+    if((crc & 0x8000) == 0x8000) crc = (crc << 1) ^ 0x1021;
+    else crc = crc << 1;
+  crc = crc & 0xFFFF;
+  return crc;
+}
+
+void process_packet_data(uint8_t* payload) 
+{
+  for(int offset=0; offset < 2; offset++)  // do two tries in case the packet header had 0x55 instead of 0xAA as the preamble
+  {
+    if(offset == 1)
+    {
+      for(int x = 31; x >= 0; x--)
+      {
+        if(x > 0) 
+          payload[x] = payload[x - 1] << 7 | payload[x] >> 1;
+        else 
+          payload[x] = payload[x] >> 1;
+      }
+    }        
+
+    // Read the payload length
+    int payload_length = payload[5] >> 2;
+    Serial.print("Payload appears to be : ");Serial.print(payload_length); Serial.println(" bytes");
+    uint16_t crc_given, crc;
+    // Check for a valid payload length, which is less than the usual 32 bytes 
+    // because we need to account for the packet header, CRC, and part or all 
+    // of the address bytes. 
+    if(payload_length <= 26)
+    {
+      // Read the given CRC
+      crc_given = (payload[6 + payload_length] << 9) | ((payload[7 + payload_length]) << 1);
+      crc_given = (crc_given << 8) | (crc_given >> 8);
+      if (payload[8 + payload_length] & 0x80) 
+         crc_given |= 0x100;
+
+         // Calculate the CRC
+         crc = 0xFFFF;
+         for(int x = 0; x < 6 + payload_length; x++) 
+           crc = crc_update(crc, payload[x], 8);
+         crc = crc_update(crc, payload[6 + payload_length] & 0x80, 1);
+         crc = (crc << 8) | (crc >> 8);
+         // Verify the CRC
+         Serial.print("CRC: "); Serial.print(crc); Serial.print(" CRC_GIVEN: "); Serial.println(crc_given);
+         if(crc == crc_given)
+         {
+            Serial.print("Valid Packet Found!!!!");
+            hexdump(payload,5+payload_length);
+         }
+     }
+  }
+}
 //-------------------------------------
 void loop() {
    uint8_t promiscuous_address[2] = { 0x55, 0x00 };
    unsigned long timeout = 100;
    channel = 1; 
    int readval ;
-   uint8_t packet[33];
+   uint8_t packet[37];
    uint8_t tryno = 0;
    
    while (channel < 85) 
@@ -440,9 +539,16 @@ void loop() {
       nrf_write(CONFIG, 0x73); //disable crc, power up,  mask interrups
       configure_address(promiscuous_address, 2);
       configure_mac(0,0, ENAA_NONE);
+    
+    // Set for transmission
+    //  Please note the CE PIN must be driven high.
       configure_phy (PRIM_RX | PWR_UP, RATE_2M, 32);
+      delay(2);
+      digitalWrite(CEPIN, HIGH); // Page 21, nRF24L01+ datasheet (Figure 3)
+      delay(1);
+      //nrf_write(RX_PW_P0,0x11); // set 32 bytes in RX payload
       Serial.print("Tuning to channel: "); Serial.println(channel);
-      nrf_write(RF_CH,channel++); //  Set the frequency to channel
+      nrf_write(RF_CH,channel); //  Set the frequency to channel
       /*nrf_write(SETUP_AW, 0x00); 
       nrf_write(FEATURE, 0); // Disable dyn payload length,
       nrf_write(DYNPD, 0); // Disable dynamic payload
@@ -450,33 +556,39 @@ void loop() {
       */
       while (millis() - starttime < timeout) 
       {
-        readval = nrf_read(R_RX_PL_WID); 
-        if (readval <= 32) {
+        readval = r_rx_pld_wid(); 
+        if (readval <= 32 && readval > 0) {
           tryno = status_rd();
-          Serial.print("== ");
-          Serial.print(channel); 
-          Serial.print(" "); 
-          Serial.print(readval); 
-          Serial.print(" Status: "); 
-          Serial.print(tryno);
-          nrf_multi_read(R_RX_PAYLOAD, readval, packet);
-          packet[readval] = 0x00;
-          flush_rx();
-          nrf_write(0x07,0x78); //reset status register
-          if (readval > 0)
-          {  
-            Serial.print("Packet obtained of size :"); 
+          r_rx_payload(packet,readval);
+          if (tryno == 0) {
+            Serial.print("== ");
+            Serial.print(channel); 
+            Serial.print(" "); 
             Serial.print(readval); 
-            Serial.print(" ");
-            hexdump(packet,readval); 
-            //starttime = millis();  // reset the timeout counter if packet received
+            Serial.print("  Status reg: "); 
+            Serial.println(tryno, HEX);
+            //packet[readval] = 0x00;
+            //flush_rx();
+            nrf_write(0x07,0x78); //reset status register
+            if (readval > 0)
+            {  
+              Serial.print("Packet obtained of size :"); 
+              Serial.print(readval); 
+              Serial.println(" ");
+              hexdump(packet,readval);
+              process_packet_data(packet); 
+              starttime = millis();  // reset the timeout counter if packet received
+            }
           }
         }
+       nrf_write(0x07,0x78); //clear status reg 
       }
+      channel++; 
       //delay(200); //ms
    }
-   channel = 1; 
+   //channel = 1; 
     
 }
 //-------------------------------------
+
 
