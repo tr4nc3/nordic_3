@@ -7,7 +7,7 @@
 
 // the sensor communicates using SPI, so include the library:
 #include <SPI.h>
-
+#include <HashMap.h>
 //---------------------------------------------
 // Hardware configuration
 // CEPIN is the read enable pin - see p22, section 6.1.4
@@ -25,6 +25,15 @@ const int CSNPIN = 10;
 
 const int DEBUG_LED = 13;
 //---------------------------------------------
+
+const int HASH_SIZE = 100; 
+HashType<uint8_t*,int> hashRawArray[HASH_SIZE]; 
+HashMap<uint8_t*,int> hashMap = HashMap<uint8_t*,int>( hashRawArray , HASH_SIZE );
+uint16_t  hashlastindex = 0 ; 
+
+const uint8_t MAX_LEN_SRCS = 32;
+uint8_t validsrcs[MAX_LEN_SRCS][5]; 
+uint8_t validcnt = 0;
 
 uint8_t channel = 1; 
 //---------------------------------------------
@@ -227,6 +236,15 @@ void nrf_multi_read(int address, int size, unsigned char *buffer) {
 }
 //-------------------------------------
 
+//-------------------------------------
+// Search valid entries in the array
+int is_already_valid(uint8_t* candidate) {
+  for (int i=0; i < validcnt; i++) {
+    if ( !compare_arr(validsrcs[i],candidate,5) ) // identical
+       return 1; 
+  }
+  return 0; // went through the array, no already captured MACs found
+}
 
 //-------------------------------------
 // Please NOTE data in NRF is little endian
@@ -428,8 +446,6 @@ void setup() {
   delay(2000);
   //while (1) ;
 }
-//-------------------------------------
-
 
 void r_rx_payload(uint8_t* data, uint8_t numbytes) {
   uint8_t junk = 0x00;
@@ -439,7 +455,7 @@ void r_rx_payload(uint8_t* data, uint8_t numbytes) {
   for (int i=0; i < numbytes; i++) {
     data[numbytes-1 -i] = SPI.transfer(junk);
   }
-  digitalWrite(CSNPIN, HIGH);
+  digitalWrite(CSNPIN, HIGH);    
   return ;  
 }
 void flush_rx() {
@@ -467,31 +483,60 @@ void hexdump(uint8_t* arr, uint8_t len)
 
 
 // Update a CRC16-CCITT with 1-8 bits from a given byte
-uint16_t crc_update(uint16_t crc, uint8_t byte, uint8_t bits)
+uint16_t crc_update(uint16_t crc, uint8_t byt, uint8_t bits)
 {
-  crc = crc ^ (byte << 8);
+  crc = crc ^ (byt << 8);
   while(bits--)
     if((crc & 0x8000) == 0x8000) crc = (crc << 1) ^ 0x1021;
     else crc = crc << 1;
   crc = crc & 0xFFFF;
   return crc;
 }
-
-void process_packet_data(uint8_t* payload) 
+void subsection(uint8_t* src, uint8_t* dst, uint8_t startindex, uint8_t len, uint8_t arraylen) {
+  if (startindex + len < arraylen)
+    for (int i = startindex ; i < len; i++) {
+      dst[i-startindex] = src[i]; 
+    }
+    return;
+}
+void array_lshifter(uint8_t* payload, uint8_t len, uint8_t bitshift) 
 {
+  uint8_t mask  = 0; 
+  if (bitshift > 0 && bitshift < 8 )  // multi-byte bitmap shifting not supported
+  {
+    for (int i = 1 ; i < bitshift; i++) {
+      mask = mask | (2 << i) ;
+    }
+    for (int i = len; i > 0; i--)  {
+      if (i >= 2)
+         payload[i-1] = payload[i-1] << bitshift | ( (payload[i-2] & mask) >> (8 - bitshift) ) ;
+       else
+         payload[i-1] = payload[i-1] << bitshift ;
+    }
+  }
+}
+
+void get_packet_details(uint8_t* payload, uint8_t* mac, int packetlen, int startindex)  {
+  uint8_t payloadlen ;
+  if (startindex == -1 ) 
+     payloadlen = payload[5] >> 2;
+  else payloadlen = payload[startindex + 5] >> 2; 
+  array_lshifter(payload, packetlen, 1) ; // left shift by 1-bit
+  
+  if (payloadlen <= 24) 
+  {
+    Serial.print("For MAC address: "); hexdump(mac,5); Serial.print(" payload length is : "); Serial.print(payloadlen); Serial.print(" and packet looks like this: ");
+    hexdump(&payload[6+payloadlen], packetlen); 
+
+  }
+}
+
+void  process_packet_data(uint8_t* payload, uint8_t packetlen) 
+{
+  /*
   for(int offset=0; offset < 2; offset++)  // do two tries in case the packet header had 0x55 instead of 0xAA as the preamble
   {
-    if(offset == 1)
-    {
-      for(int x = 31; x >= 0; x--)
-      {
-        if(x > 0) 
-          payload[x] = payload[x - 1] << 7 | payload[x] >> 1;
-        else 
-          payload[x] = payload[x] >> 1;
-      }
-    }        
-
+    array_lshifter(payload, packetlen, offset) ; 
     // Read the payload length
     int payload_length = payload[5] >> 2;
     
@@ -499,42 +544,143 @@ void process_packet_data(uint8_t* payload)
     // Check for a valid payload length, which is less than the usual 32 bytes 
     // because we need to account for the packet header, CRC, and part or all 
     // of the address bytes. 
-    if(payload_length <= 26)
+    if(payload_length <= 24)
     {
       Serial.print("Payload appears to be : ");Serial.print(payload_length); Serial.println(" bytes");
       // Read the given CRC
-      crc_given = (payload[6 + payload_length] << 9) | ((payload[7 + payload_length]) << 1);
+      crc_given = (payload[packetlen- 1  - 6 - payload_length + 1] << 9) | (payload[packetlen - 7 - payload_length] << 1);  
       crc_given = (crc_given << 8) | (crc_given >> 8);
-      if (payload[8 + payload_length] & 0x80) 
-         crc_given |= 0x100;
+      if (payload[packetlen - 1 - 8 - payload_length + 1] & 0x80) 
+         crc_given |= 0x100;  //???
 
          // Calculate the CRC
-         crc = 0xFFFF;
-         for(int x = 0; x < 6 + payload_length; x++) 
-           crc = crc_update(crc, payload[x], 8);
-         crc = crc_update(crc, payload[6 + payload_length] & 0x80, 1);
-         crc = (crc << 8) | (crc >> 8);
-         // Verify the CRC
-         Serial.print("CRC: "); Serial.print(crc); Serial.print(" CRC_GIVEN: "); Serial.println(crc_given);
-         if(crc == crc_given)
-         {
-            Serial.print("Valid Packet Found!!!!");
-            hexdump(payload,5+payload_length);
-         }
+       crc = 0xFFFF;
+       for(int x = 2; x < packetlen ; x++) 
+         crc = crc_update(crc, payload[x], 8);
+       crc = crc_update(crc, payload[packetlen +1 - 6 - payload_length] & 0x80, 1);
+       crc = (crc << 8) | (crc >> 8);
+       // Verify the CRC
+       Serial.print("CRC: "); Serial.print(crc); Serial.print(" CRC_GIVEN: "); Serial.println(crc_given);
+       if(crc == crc_given)
+       {
+          Serial.print("Valid Packet Found!!!!");
+          hexdump(payload,5+payload_length);
+       }
      }
+  }*/
+  /*
+  uint8_t payloadlens[2] = { 0x00, 0x00 } ;
+  payloadlens[0] = payload[5] << 1 & 0xfc;
+  payloadlens[0] = payloadlens[0] >> 2;      // 1st possible payload length
+  payloadlens[1] = (payload[5] & 0x3f) >> 2; // 2nd possible payload length
+  uint16_t crc_given, crc; 
+  
+  uint8_t prefix_length = 5; // Address length (could be 3, 4 or 5 bytes ... let's go with 5 for now)
+
+  for (int i = 0; i < 2 ; i++) 
+  {
+    
+    crc_given = (payload[6 + payloadlens[i]] << 8) | ((payload[7 + payloadlens[i]]) << 1);  
+    crc_given = (crc_given << 8) | (crc_given >> 8);
+    if (payload[8 + payloadlens[i]] & 0x80) 
+      crc_given |= 0x100;
+
+    // Calculate the CRC
+    crc = 0xFFFF;
+    for(int x = 0; x < 6 + payloadlens[i]; x++) 
+       crc = crc_update(crc, payload[x], 8);
+    crc = crc_update(crc, payload[6 + payloadlens[i]] & 0x80, 1);
+    crc = (crc << 8) | (crc >> 8);
+    // Verify the CRC
+    Serial.print("CRC: "); Serial.print(crc); Serial.print(" CRC_GIVEN: "); Serial.println(crc_given);
+    if(crc == crc_given)
+    {
+      Serial.print("Valid Packet Found!!!!");
+      hexdump(payload,5+payloadlens[i]);
+    }
+  } */
+  int delimloc[33] = { -1 } ;
+  uint8_t delimlen = 0;
+  uint8_t packetsection[5]; 
+  uint8_t fakelimit = 6;
+  int index = 1 ;
+  delimloc[0] = -1; //0th
+  for (int i = 0 ; i < packetlen; i++) {
+    if (payload[i] == 0x55 || payload[i] == 0xAA) {
+      delimloc[index++] = i;
+    }
   }
+  delimlen = index ;
+  Serial.print("Found "); Serial.print(delimlen); Serial.println(" delimiters");
+  index = 0;
+  for (int j=0; j < delimlen; j++) {
+    if (delimloc[j] + fakelimit > packetlen) {
+      fakelimit = packetlen - delimloc[j] - 1;
+      if (fakelimit > packetlen)  // limit can't be greater than packetlen
+        return;
+    } 
+    else 
+    {
+      for (int i=0; i<5; i++) packetsection[i] = 0; 
+      fakelimit = 5;
+      for (int i = delimloc[j]+1 ; i <= delimloc[j] + fakelimit ; i++) {
+        if (i+5 < packetlen) {
+          subsection(payload, packetsection, i, 5, packetlen );
+          //hexdump(packetsection,5);
+          index = hashMap.getIndexOf(packetsection);
+          if ( index > -1 ) {  
+            Serial.print("Found MAC! ");
+            //hexdump(packetsection,5); 
+            hashMap[index](packetsection,hashMap.getValueOf(packetsection) + 1); 
+           //return packetsection; 
+           if (! is_already_valid(packetsection)) 
+              if (validcnt < MAX_LEN_SRCS) {
+                for (int in = 0 ; in < 5 ; in++ ) 
+                   validsrcs[validcnt][in] = packetsection[in];
+                validcnt++;
+              }
+           else {
+              Serial.println (" ... too bad .. already captured ...");
+              get_packet_details(payload, packetsection, packetlen, delimloc[j] ) ; 
+           }
+          }
+          else
+          {
+            hashMap[hashlastindex++](packetsection, 1); 
+          }
+        }
+        else {
+          Serial.println("Delimiter + 5 exceeds packetlen");
+          return;
+        }
+      }
+    }
+  }  // end of for all delims
+
+  return ; 
+}
+
+int compare_arr(uint8_t* src, uint8_t* dst, int len) {
+
+  for (int i = 0; i < len; i++) {
+    if (src[i] != dst[i]) 
+      return src[i] - dst[i];
+  }
+  return 0; 
 }
 //-------------------------------------
 void loop() {
    uint8_t promiscuous_address[2] = { 0x55, 0x00 };
+   //uint8_t promiscuous_address[3] = { 0x11, 0x22, 0x33 };
    unsigned long timeout = 100;
    channel = 1; 
    int readval ;
    uint8_t packet[37];
    uint8_t tryno = 0;
-   uint8_t addr[5]  = { 0xff } ; 
+   uint8_t addr[5]  = { 0xff, 0xff, 0xff, 0xff, 0xff } ; 
    uint8_t fifostatus ; 
    uint16_t packetscaptured = 0 ;
+   uint8_t rcvdpowerflag = 0 ;
    
    while (channel < 85) 
    {
@@ -544,9 +690,10 @@ void loop() {
       configure_address(promiscuous_address, 2);
       configure_mac(0,0, ENAA_NONE);
       
-    // Set for transmissi on
+    // Set for transmission
     //  Please note the CE PIN must be driven high.
-      configure_phy (PRIM_RX | PWR_UP, RATE_2M, 32);
+      //configure_phy (PRIM_RX | PWR_UP, RATE_2M, 32);
+      configure_phy (PRIM_RX | PWR_UP, RATE_1M, 32);
       delay(2);
       digitalWrite(CEPIN, HIGH); // Page 21, nRF24L01+ datasheet (Figure 3)
       delay(1);
@@ -564,10 +711,10 @@ void loop() {
         readval = r_rx_pld_wid(); 
         if (readval <= 32 && readval > 0) 
         {
-          
           tryno = status_rd();
-          r_rx_payload(packet,readval);
+          r_rx_payload(packet,readval); // lsb at byte [0], msb at byte [len - 1]
           nrf_multi_read(RX_ADDR_P0, 5, addr);
+          rcvdpowerflag = nrf_read(RPD);
           nrf_write(STATUS, 0x40); //reset status
           fifostatus = nrf_read(FIFO_STATUS); // Expect the RX_EMPTY flag set
           if (tryno == 0x40) 
@@ -586,6 +733,8 @@ void loop() {
             } 
             Serial.print(" FIFO_STATUS : ");
             Serial.print(fifostatus,HEX);
+            Serial.print(" RPD Flag : "); 
+            Serial.print(rcvdpowerflag);
             Serial.println("");
             if (readval > 0)
             {  
@@ -593,7 +742,7 @@ void loop() {
               Serial.print(readval); 
               Serial.println(" ");
               hexdump(packet,readval);
-              process_packet_data(packet); 
+              process_packet_data(packet, readval);  //readval is packetlen
               starttime = millis();  // reset the timeout counter if packet received
             }
           }
@@ -609,7 +758,11 @@ void loop() {
       packetscaptured = 0 ; 
       //delay(200); //ms
    }
-   //channel = 1; 
+   //channel = 1;
+   
+   for (int in = 0 ; in < validcnt; in++) { 
+       hexdump(validsrcs[in],5);
+   }
     
 }
 //-------------------------------------
