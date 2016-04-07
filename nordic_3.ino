@@ -7,7 +7,7 @@
 
 // the sensor communicates using SPI, so include the library:
 #include <SPI.h>
-#include <HashMap.h>
+//#include <HashMap.h>
 //---------------------------------------------
 // Hardware configuration
 // CEPIN is the read enable pin - see p22, section 6.1.4
@@ -25,13 +25,259 @@ const int CSNPIN = 10;
 
 const int DEBUG_LED = 13;
 //---------------------------------------------
+#if (defined(__GNUC__) && defined(__i386__)) || defined(__WATCOMC__) \
+  || defined(_MSC_VER) || defined (__BORLANDC__) || defined (__TURBOC__)
+#define get16bits(d) (*((const uint16_t *) (d)))
+#endif
 
-const int HASH_SIZE = 100; 
-HashType<uint8_t*,int> hashRawArray[HASH_SIZE]; 
-HashMap<uint8_t*,int> hashMap = HashMap<uint8_t*,int>( hashRawArray , HASH_SIZE );
-uint16_t  hashlastindex = 0 ; 
+#if !defined (get16bits)
+#define get16bits(d) ((((uint32_t)(((const uint8_t *)(d))[1])) << 8)\
+                       +(uint32_t)(((const uint8_t *)(d))[0]) )
+#endif
+// Thanks - http://www.azillionmonkeys.com/qed/hash.html
+uint32_t SuperFastHash (const char * data, int len) 
+{
+  uint32_t hash = len, tmp;
+  int rem;
+  
+      if (len <= 0 || data == NULL) return 0;
+  
+      rem = len & 3;
+      len >>= 2;
+  
+      /* Main loop */
+      for (;len > 0; len--) {
+          hash  += get16bits (data);
+          tmp    = (get16bits (data+2) << 11) ^ hash;
+          hash   = (hash << 16) ^ tmp;
+          data  += 2*sizeof (uint16_t);
+          hash  += hash >> 11;
+      }
+  
+      /* Handle end cases */
+      switch (rem) {
+          case 3: hash += get16bits (data);
+                  hash ^= hash << 16;
+                  hash ^= ((signed char)data[sizeof (uint16_t)]) << 18;
+                  hash += hash >> 11;
+                  break;
+          case 2: hash += get16bits (data);
+                  hash ^= hash << 11;
+                  hash += hash >> 17;
+                  break;
+          case 1: hash += (signed char)*data;
+                  hash ^= hash << 10;
+                  hash += hash >> 1;
+      }
+  
+      /* Force "avalanching" of final 127 bits */
+      hash ^= hash << 3;
+      hash += hash >> 5;
+      hash ^= hash << 4;
+      hash += hash >> 17;
+      hash ^= hash << 25;
+      hash += hash >> 6;
+  
+      return hash;
+}
 
-const uint8_t MAX_LEN_SRCS = 32;
+// ---------------------------------------
+struct node 
+{
+  unsigned char* value;
+  uint32_t       count; 
+  int   valuelen; 
+  struct node*   next; 
+  node() 
+  {
+    value = NULL;
+    count = 0;
+    valuelen = 0 ;
+    next = NULL;
+  }
+  ~node() 
+  {
+    delete[] value; 
+    next = NULL; 
+    valuelen = 0; 
+    count = 0;
+  }
+  node(unsigned char* val,int len) 
+  {
+    value = new unsigned char[len]; 
+    valuelen = len; 
+    memcpy(value,val,len);
+    count = 1; 
+    next = NULL; 
+  }
+}; 
+// ---------------------------------------
+const int HASH_SIZE = 48; 
+class HashTable 
+{
+  private:
+    struct node**  tblbase; 
+    uint32_t*      bucketsize; 
+    //uint32_t       hash;     // hash code - an int representation of the key
+    //unsigned int   keysize; // size of the unsigned char*
+    //unsigned int   value;   // value for the key
+    //unsigned char* key;     // the key field
+    unsigned int   tblsize; // size of the table 
+    unsigned int   maxtblsize;
+    uint32_t getHashCode(unsigned char* keytosearch,int len) 
+    {
+      return SuperFastHash((const char*) keytosearch,len);
+    }
+  public:
+    HashTable() 
+    {
+      maxtblsize = HASH_SIZE; 
+      tblbase = new struct node* [HASH_SIZE];  // allocate HASH_SIZE of elements and init each to NULL, allocating pointers
+      bucketsize = new uint32_t[HASH_SIZE];    //count of number of values in a bucket
+      for (int i=0; i < HASH_SIZE; i++) 
+      {
+        tblbase[i] = NULL; 
+        bucketsize[i] = 0;
+      }
+      tblsize = 0; 
+    }
+    ~HashTable() 
+    {
+      for (int i = 0; i < maxtblsize; i++) 
+      {
+        if (bucketsize[i] > 1) 
+        {
+          struct node* tmp = tblbase[i]; 
+          struct node* nxt = tmp->next; 
+          while (tmp != NULL) 
+          {
+            delete tmp;
+            tmp = nxt; 
+            nxt = tmp->next; 
+          }
+        }
+      }
+      delete[]  bucketsize;
+      delete[]  tblbase; 
+    }
+    HashTable(int val) 
+    {  //size
+      maxtblsize = val; 
+      tblbase = new struct node* [val];  // allocate HASH_SIZE of elements and init to NULL
+      bucketsize = new uint32_t[val];  // count of number of values in that bucket
+      for (int i=0; i < val; i++) 
+      {
+        tblbase[i] = NULL; 
+        bucketsize[i] = 0 ; 
+      }
+    }
+    struct node* contains(unsigned char* val2search, uint32_t vallen) 
+    {
+      uint32_t hashval =  getHashCode(val2search,vallen);  
+      if (containsHash(hashval)) 
+      {  // Hash is contained ... check if there is a bucket size > 0 (conflicts)
+        if (bucketsize[hashval % maxtblsize ] > 0 )
+        {
+          struct node* temp = tblbase[hashval % maxtblsize ];
+          for (int i = 0 ; i < bucketsize[hashval % maxtblsize] ; i++) 
+          {
+            if (temp != NULL)
+            {
+              if (temp->valuelen == vallen) 
+              { // if string length is not equal ignore comparison
+                if (memcmp(val2search, temp->value, vallen) == 0 )
+                {
+                   return temp;
+                }
+              }
+            }
+            temp = temp->next; 
+          }
+        }
+      }
+      return NULL;
+    }
+    int containsHash(uint32_t hash) 
+    {
+      if (tblbase[hash % maxtblsize] != NULL) 
+        return 1;
+      return 0;
+    }
+
+    // ht["bla"] = 4;  "bla" is 3 chars, value = 4
+    void addKey(unsigned char* key, unsigned int keylen, unsigned int value) 
+    {
+      uint32_t hashinsert  = getHashCode(key, keylen); 
+      struct node* entry = NULL ; 
+      if ( ( entry = this->contains(key,keylen) ) != NULL) 
+      {  // value is found, overwrite that value
+        entry->count = value; 
+      }
+      else 
+      {
+        struct node* newnode = new struct node(key,keylen); 
+        //newnode->next = NULL; 
+        tblbase[hashinsert % maxtblsize] = newnode;
+        bucketsize[hashinsert % maxtblsize] += 1; 
+      }
+      this->tblsize++;
+    }
+
+    struct node* getValue (unsigned char* key2search, int keylen) 
+    {
+      uint32_t hashval = SuperFastHash((const char*) key2search,keylen);
+      struct node* entry = NULL; 
+      if ( ( entry = this->contains(key2search,keylen) ) != NULL )
+      {
+        //return tblbase[ hashval % maxtblsize ] ; 
+        return entry;  // return the node, dereference the pointer at the caller and get values 
+      }
+      return NULL;
+    }
+
+    int deleteKey(unsigned char* val2del, uint32_t vallen) 
+    {  // TODO
+      return 0;
+    }
+
+    void debug() 
+    {
+      int counter;  
+      Serial.print("Max. size is : "); Serial.println(maxtblsize);
+      for (int i=0; i < maxtblsize; i++) 
+      {
+        if (tblbase[i] != NULL) 
+        {
+          counter = 0; 
+          //Serial.print("Row number : ");Serial.print(i);Serial.print(" has ");Serial.print(bucketsize[i]);Serial.println(" values");
+          Serial.print("tblsize[");Serial.print(i);Serial.print("] has ");Serial.print(bucketsize[i]);Serial.println(" values");
+          struct node* temp = tblbase[i];
+          while (temp != NULL) 
+          {
+            Serial.print("len(bucket[");Serial.print(counter);Serial.print("]) = ");Serial.println(temp->valuelen);
+            for (int j = 0 ; j < temp->valuelen; j++) 
+            {
+              Serial.print("0x");Serial.print(temp->value[j],HEX); 
+              Serial.print(" ");
+            }
+            Serial.print("; Count is : ");  Serial.println(temp->count); 
+            temp = temp->next;
+            counter++; 
+          }
+          Serial.println("");
+        }
+      }
+    }
+};
+
+// ---------------------------------------
+
+//HashType<uint8_t*,int> hashRawArray[HASH_SIZE]; 
+//HashMap<uint8_t*,int> hashMap = HashMap<uint8_t*,int>( hashRawArray , HASH_SIZE );
+//uint16_t  hashlastindex = 0 ; 
+
+HashTable ht; 
+const uint8_t MAX_LEN_SRCS = 96;
 uint8_t validsrcs[MAX_LEN_SRCS][5]; 
 uint8_t validcnt = 0;
 
@@ -237,7 +483,8 @@ void nrf_multi_read(int address, int size, unsigned char *buffer) {
 //-------------------------------------
 
 //-------------------------------------
-// Search valid entries in the array
+// Search valid entries in the array, size not sent because implicitly assumed to be 5
+// TODO: add size param and make it generic
 int is_already_valid(uint8_t* candidate) {
   for (int i=0; i < validcnt; i++) {
     if ( !compare_arr(validsrcs[i],candidate,5) ) // identical
@@ -453,7 +700,8 @@ void r_rx_payload(uint8_t* data, uint8_t numbytes) {
   digitalWrite(CSNPIN, LOW);
   SPI.transfer(R_RX_PAYLOAD);
   for (int i=0; i < numbytes; i++) {
-    data[numbytes-1 -i] = SPI.transfer(junk);
+    //data[numbytes-1 -i] = SPI.transfer(junk);
+    data[i] = SPI.transfer(junk);
   }
   digitalWrite(CSNPIN, HIGH);    
   return ;  
@@ -478,7 +726,7 @@ void hexdump(uint8_t* arr, uint8_t len)
     Serial.print(arr[i], HEX);
     Serial.print(" ");
   }
-  Serial.println("");
+  //Serial.println("");
 }
 
 
@@ -516,12 +764,17 @@ void array_lshifter(uint8_t* payload, uint8_t len, uint8_t bitshift)
   }
 }
 
-void get_packet_details(uint8_t* payload, uint8_t* mac, int packetlen, int startindex)  {
+void get_packet_details(uint8_t* payload, uint8_t* mac, int packetlen, int startindex)  
+{  // payload is lowest bytes first a[0] == lowest significant byte
+  uint16_t crc = 0 ;
   uint8_t payloadlen ;
   if (startindex == -1 ) 
-     payloadlen = payload[5] >> 2;
+  {
+    crc = payload[1] << 8 | payload[0];
+    payloadlen = payload[5] >> 2;
+  }
   else payloadlen = payload[startindex + 5] >> 2; 
-  array_lshifter(payload, packetlen, 1) ; // left shift by 1-bit
+  //array_lshifter(payload, packetlen, 1) ; // left shift by 1-bit
   
   if (payloadlen <= 24) 
   {
@@ -599,11 +852,14 @@ void  process_packet_data(uint8_t* payload, uint8_t packetlen)
       hexdump(payload,5+payloadlens[i]);
     }
   } */
+  // packetlen is the size of the payload array  
   int delimloc[33] = { -1 } ;
   uint8_t delimlen = 0;
   uint8_t packetsection[5]; 
   uint8_t fakelimit = 6;
   int index = 1 ;
+  struct node* elem = NULL; 
+  
   delimloc[0] = -1; //0th
   for (int i = 0 ; i < packetlen; i++) {
     if (payload[i] == 0x55 || payload[i] == 0xAA) {
@@ -613,52 +869,69 @@ void  process_packet_data(uint8_t* payload, uint8_t packetlen)
   delimlen = index ;
   Serial.print("Found "); Serial.print(delimlen); Serial.println(" delimiters");
   index = 0;
-  for (int j=0; j < delimlen; j++) {
-    if (delimloc[j] + fakelimit > packetlen) {
+  for (int j=0; j < delimlen; j++) 
+  {
+    if (delimloc[j] + fakelimit > packetlen) 
+    {
       fakelimit = packetlen - delimloc[j] - 1;
       if (fakelimit > packetlen)  // limit can't be greater than packetlen
-        return;
+        //return;
+        continue;
     } 
     else 
     {
-      for (int i=0; i<5; i++) packetsection[i] = 0; 
-      fakelimit = 5;
-      for (int i = delimloc[j]+1 ; i <= delimloc[j] + fakelimit ; i++) {
-        if (i+5 < packetlen) {
-          subsection(payload, packetsection, i, 5, packetlen );
-          //hexdump(packetsection,5);
-          index = hashMap.getIndexOf(packetsection);
-          if ( index > -1 ) {  
-            Serial.print("Found MAC! ");
-            //hexdump(packetsection,5); 
-            hashMap[index](packetsection,hashMap.getValueOf(packetsection) + 1); 
-           //return packetsection; 
-           if (! is_already_valid(packetsection)) 
-              if (validcnt < MAX_LEN_SRCS) {
-                for (int in = 0 ; in < 5 ; in++ ) 
-                   validsrcs[validcnt][in] = packetsection[in];
-                validcnt++;
-              }
-           else {
+      if (delimloc[j]+6 < packetlen) 
+      {
+        //subsection(payload, packetsection, i, 5, packetlen );
+        subsection(payload, packetsection, delimloc[j]+1, 5, packetlen );
+        //hexdump(packetsection,5);
+        elem = ht.contains(packetsection,5);
+        //index = is_already_valid(packetsection);
+        if ( elem != NULL ) 
+        {  
+        //if (index) {
+          Serial.print("Found MAC! ");
+          hexdump(packetsection,5); 
+          elem->count++;
+          
+          //hashMap[index](packetsection,hashMap.getValueOf(packetsection) + 1); 
+          //hashMap[index].setValue(hashMap.getValueOf(packetsection) + 1);
+          //Serial.print("Found at index : " ); Serial.print(index); Serial.print(" with value "); Serial.println(hashMap.getValueOf(packetsection));
+          //return packetsection; 
+         /*if (! is_already_valid(packetsection)) 
+            if (validcnt < MAX_LEN_SRCS) {
+              for (int in = 0 ; in < 5 ; in++ ) 
+                 validsrcs[validcnt][in] = packetsection[in];
+              validcnt++;
+            }
+            else {
               Serial.println (" ... too bad .. already captured ...");
               get_packet_details(payload, packetsection, packetlen, delimloc[j] ) ; 
-           }
-          }
-          else
-          {
-            hashMap[hashlastindex++](packetsection, 1); 
-          }
+            }*/
         }
-        else {
-          Serial.println("Delimiter + 5 exceeds packetlen");
-          return;
+        else
+        {
+          /*if (! is_already_valid(packetsection)) {
+            if (validcnt < MAX_LEN_SRCS) {
+              for (int in = 0 ; in < 5 ; in++ ) 
+                 validsrcs[validcnt][in] = packetsection[in];
+              validcnt++;
+            }
+          }*/
+          //hashMap[hashlastindex++](packetsection, 1); 
+          // Not present ... so add it
+          ht.addKey(packetsection,5,1);  // value, len of value, count
         }
+        //ht.debug();
+      }
+      else 
+      {
+        Serial.println("Delimiter + 5 exceeds packetlen");
+        return;
       }
     }
-  }  // end of for all delims
-
-  return ; 
-}
+  }
+}  // end of for all delims
 
 int compare_arr(uint8_t* src, uint8_t* dst, int len) {
 
@@ -681,89 +954,96 @@ void loop() {
    uint8_t fifostatus ; 
    uint16_t packetscaptured = 0 ;
    uint8_t rcvdpowerflag = 0 ;
-   
-   while (channel < 85) 
-   {
-      unsigned long starttime = millis();
-      nrf_write(STATUS,0x70); //reset status register
-      nrf_write(CONFIG, 0x73); //disable crc, power up,  mask interrups
-      configure_address(promiscuous_address, 2);
-      configure_mac(0,0, ENAA_NONE);
-      
-    // Set for transmission
-    //  Please note the CE PIN must be driven high.
-      //configure_phy (PRIM_RX | PWR_UP, RATE_2M, 32);
-      configure_phy (PRIM_RX | PWR_UP, RATE_1M, 32);
-      delay(2);
-      digitalWrite(CEPIN, HIGH); // Page 21, nRF24L01+ datasheet (Figure 3)
-      delay(1);
-      //nrf_write(RX_PW_P0,0x11); // set 32 bytes in RX payload
-      Serial.print("Tuning to channel: "); Serial.println(channel);
-      nrf_write(RF_CH,channel); //  Set the frequency to channel
-      /*nrf_write(SETUP_AW, 0x00); 
-      nrf_write(FEATURE, 0); // Disable dyn payload length,
-      nrf_write(DYNPD, 0); // Disable dynamic payload
-      nrf_write(EN_AA, 0); // Disable auto acknowledgement
-      */
-      packetscaptured = 0;
-      while (millis() - starttime < timeout) 
-      {
-        readval = r_rx_pld_wid(); 
-        if (readval <= 32 && readval > 0) 
+   uint8_t mouseaddr[5] = { 0xA8, 0xAC, 0x0D, 0x41, 0x66 }; 
+   for (int m = 0 ; m < 2 ; m++)  
+   {  // try both trailers
+     if (m == 1 ) promiscuous_address[0] = 0xAA;
+     
+     while (channel < 85) 
+     {
+        unsigned long starttime = millis();
+        nrf_write(STATUS,0x70); //reset status register
+        nrf_write(CONFIG, 0x73); //disable crc, power up,  mask interrups
+        configure_address(promiscuous_address, 2);
+        //configure_address(mouseaddr,5);
+        configure_mac(0,0, ENAA_NONE);
+        
+      // Set for transmission
+      //  Please note the CE PIN must be driven high.
+        configure_phy (PRIM_RX | PWR_UP, RATE_2M, 32);
+        //configure_phy (PRIM_RX | PWR_UP, RATE_1M, 32);
+        //configure_phy(PRIM_RX | PWR_UP, RATE_250K, 32);
+        delay(2);
+        digitalWrite(CEPIN, HIGH); // Page 21, nRF24L01+ datasheet (Figure 3)
+        delay(1);
+        //nrf_write(RX_PW_P0,0x11); // set 32 bytes in RX payload
+        Serial.print("Tuning to channel: "); Serial.println(channel);
+        nrf_write(RF_CH,channel); //  Set the frequency to channel
+        /*nrf_write(SETUP_AW, 0x00); 
+        nrf_write(FEATURE, 0); // Disable dyn payload length,
+        nrf_write(DYNPD, 0); // Disable dynamic payload
+        nrf_write(EN_AA, 0); // Disable auto acknowledgement
+        */
+        packetscaptured = 0;
+        while (millis() - starttime < timeout) 
         {
-          tryno = status_rd();
-          r_rx_payload(packet,readval); // lsb at byte [0], msb at byte [len - 1]
-          nrf_multi_read(RX_ADDR_P0, 5, addr);
-          rcvdpowerflag = nrf_read(RPD);
-          nrf_write(STATUS, 0x40); //reset status
-          fifostatus = nrf_read(FIFO_STATUS); // Expect the RX_EMPTY flag set
-          if (tryno == 0x40) 
+          readval = r_rx_pld_wid(); 
+          if (readval <= 32 && readval > 0) 
           {
-            packetscaptured++;
-            Serial.print("== ");
-            Serial.print(channel); 
-            Serial.print(" "); 
-            Serial.print(readval); 
-            Serial.print("  Status reg: "); 
-            Serial.print(tryno, HEX);
-            Serial.print(" Address : ");
-            for (int i=0; i < 5; i++) 
+            tryno = status_rd();
+            r_rx_payload(packet,readval); // lsb at byte [0], msb at byte [len - 1]
+            nrf_multi_read(RX_ADDR_P0, 5, addr);
+            rcvdpowerflag = nrf_read(RPD);
+            nrf_write(STATUS, 0x40); //reset status
+            fifostatus = nrf_read(FIFO_STATUS); // Expect the RX_EMPTY flag set
+            if (tryno == 0x40) 
             {
-               Serial.print(addr[i], HEX); Serial.print(" ");
-            } 
-            Serial.print(" FIFO_STATUS : ");
-            Serial.print(fifostatus,HEX);
-            Serial.print(" RPD Flag : "); 
-            Serial.print(rcvdpowerflag);
-            Serial.println("");
-            if (readval > 0)
-            {  
-              Serial.print("Packet obtained of size :"); 
+              packetscaptured++;
+              Serial.print("== ");
+              Serial.print(channel); 
+              Serial.print(" "); 
               Serial.print(readval); 
-              Serial.println(" ");
-              hexdump(packet,readval);
-              process_packet_data(packet, readval);  //readval is packetlen
-              starttime = millis();  // reset the timeout counter if packet received
+              Serial.print("  Status reg: "); 
+              Serial.print(tryno, HEX);
+              Serial.print(" Address : ");
+              for (int i=0; i < 5; i++) 
+              {
+                 Serial.print(addr[i], HEX); Serial.print(" ");
+              } 
+              Serial.print(" FIFO_STATUS : ");
+              Serial.print(fifostatus,HEX);
+              Serial.print(" RPD Flag : "); 
+              Serial.print(rcvdpowerflag);
+              Serial.println("");
+              if (readval > 0)
+              {  
+                Serial.print("Packet obtained of size :"); 
+                Serial.print(readval); 
+                Serial.println(" ");
+                hexdump(packet,readval);
+                process_packet_data(packet, readval);  //readval is packetlen
+                starttime = millis();  // reset the timeout counter if packet received
+              }
             }
+            else 
+              if (tryno == 0x00) {
+                flush_rx();
+              }
           }
-          else 
-            if (tryno == 0x00) {
-              flush_rx();
-            }
+         nrf_write(STATUS,0x40); //clear status reg 
         }
-       nrf_write(STATUS,0x40); //clear status reg 
-      }
-      Serial.print(" Packets captured at Channel "); Serial.print(channel); Serial.print(" : "); Serial.println(packetscaptured); 
-      channel++;
-      packetscaptured = 0 ; 
-      //delay(200); //ms
-   }
-   //channel = 1;
-   
-   for (int in = 0 ; in < validcnt; in++) { 
-       hexdump(validsrcs[in],5);
-   }
-    
+        Serial.print(" Packets captured at Channel "); Serial.print(channel); Serial.print(" : "); Serial.println(packetscaptured); 
+        channel++;
+        packetscaptured = 0 ; 
+        //delay(200); //ms
+     }
+     //channel = 1;
+     ht.debug();
+     //for (int in = 0 ; in < validcnt; in++) { 
+         //hexdump(validsrcs[in],5);Serial.println("");
+//         Serial.print(" Occurred ");Serial.print(hashMap.getValueOf(validsrcs[in]),DEC); Serial.println(" times ");
+     //}
+   }  
 }
 //-------------------------------------
 
